@@ -1156,6 +1156,118 @@ void PrinterWebViewPanel::on_reload_event(const std::string& message_data)
     }
 }
 
+wxString FilamentDBWebViewPanel::url_from_app_config()
+{
+    wxString url = GUI::from_u8(wxGetApp().app_config->get("filamentdb_url"));
+    url.Trim(true).Trim(false);
+    return url;
+}
+
+FilamentDBWebViewPanel::FilamentDBWebViewPanel(wxWindow* parent)
+    // "other_loading" / "other_error" are the generic (non Prusa-branded) pages,
+    // the same ones the Prusa Link printer webview uses. The error page's Reload
+    // button posts to window.ExternalApp, so that handler has to be registered --
+    // and an unreachable Filament DB server is exactly when the user needs it.
+    : WebViewPanel(parent, url_from_app_config(), { "ExternalApp" }, "other_loading", "other_error", false)
+{
+}
+
+void FilamentDBWebViewPanel::define_css()
+{
+    if (m_styles_defined) {
+        return;
+    }
+    m_styles_defined = true;
+    BOOST_LOG_TRIVIAL(debug) << __FUNCTION__;
+#if defined(__APPLE__)
+    // No CSS to inject, but WKWebView swallows the keyboard shortcuts, so bridge
+    // them back to the application the way the other web view tabs do.
+    std::string script = R"(
+        document.addEventListener('keydown', function (event) {
+            if (event.key === 'F5' || (event.ctrlKey && event.key === 'r') || (event.metaKey && event.key === 'r')) {
+                 window.webkit.messageHandlers.ExternalApp.postMessage(JSON.stringify({ event: 'reloadHomePage', fromKeyboard: 1}));
+            }
+            if (event.metaKey && event.key === 'q') {
+                 window.webkit.messageHandlers.ExternalApp.postMessage(JSON.stringify({ event: 'appQuit'}));
+            }
+            if (event.metaKey && event.key === 'm') {
+                 window.webkit.messageHandlers.ExternalApp.postMessage(JSON.stringify({ event: 'appMinimize'}));
+            }
+        });
+    )";
+    run_script(script);
+#endif // defined(__APPLE__)
+}
+
+void FilamentDBWebViewPanel::on_script_message(wxWebViewEvent& evt)
+{
+    const std::string message_data = into_u8(evt.GetString());
+
+    if (message_data.find("appQuit") != std::string::npos) {
+        on_app_quit_event(message_data);
+        return;
+    }
+    if (message_data.find("appMinimize") != std::string::npos) {
+        on_app_minimize_event(message_data);
+        return;
+    }
+    if (message_data.find("reloadHomePage") != std::string::npos) {
+        // Sent by the Reload button on other_error.html and by the macOS
+        // keyboard bridge above.
+        m_styles_defined = false;
+        try {
+            std::stringstream ss(message_data);
+            pt::ptree ptree;
+            pt::read_json(ss, ptree);
+            if (const auto keyboard = ptree.get_optional<bool>("fromKeyboard"); keyboard && *keyboard) {
+                // The real page is up -- a plain reload is enough.
+                do_reload();
+            } else {
+                // We are on the error page, which is not under m_default_url, so
+                // reloading would just redisplay the error. Do a fresh load.
+                load_default_url();
+            }
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "Could not parse message. " << e.what();
+        }
+        return;
+    }
+
+    WebViewPanel::on_script_message(evt);
+}
+
+void FilamentDBWebViewPanel::reload_from_app_config()
+{
+    const wxString url = url_from_app_config();
+    if (url.empty() || url == m_default_url)
+        return;
+
+    set_default_url(url);
+    m_reached_default_url = false;
+    if (m_browser && !m_do_late_webview_create && m_shown)
+        load_default_url();
+    else
+        // Either the browser is still to be created on first show, or this tab is
+        // not the one on screen -- and load_url() would Show()/Raise() the panel
+        // over the active tab. Let on_show() pick the new URL up instead.
+        m_load_default_url = true;
+}
+
+void FilamentDBWebViewPanel::on_navigation_request(wxWebViewEvent& evt)
+{
+    const wxString url = evt.GetURL();
+    if (url.StartsWith(m_default_url)) {
+        m_reached_default_url = true;
+        if (url == m_browser->GetCurrentURL()) {
+            // Redefine the styles when a reload is hit.
+            m_styles_defined = false;
+        }
+    } else if (m_reached_default_url && url.Find(GUI::format_wxstr("/web/%1%.html", m_loading_html)) != wxNOT_FOUND) {
+        // Do not allow the back button to walk into the loading screen.
+        evt.Veto();
+    }
+}
+
 PrintablesWebViewPanel::PrintablesWebViewPanel(wxWindow* parent)
     : WebViewPanel(parent, GUI::from_u8(Utils::ServiceConfig::instance().printables_url()), { "ExternalApp" }, "other_loading", "other_error", false)
 {  

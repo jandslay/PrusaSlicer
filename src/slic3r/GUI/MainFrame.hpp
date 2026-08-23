@@ -48,6 +48,7 @@ class GalleryDialog;
 class ConnectWebViewPanel; 
 class PrinterWebViewPanel;
 class PrintablesWebViewPanel;
+class FilamentDBWebViewPanel;
 
 enum QuickSlice
 {
@@ -106,6 +107,8 @@ class MainFrame : public DPIFrame
     bool                    m_printables_webview_added{ false };
     PrinterWebViewPanel*    m_printer_webview{ nullptr };
     bool                    m_printer_webview_added{ false };
+    FilamentDBWebViewPanel* m_filamentdb_webview{ nullptr };
+    bool                    m_filamentdb_webview_added{ false };
 
     std::string     get_base_name(const wxString &full_name, const char *extension = nullptr) const;
     std::string     get_dir_name(const wxString &full_name) const;
@@ -233,6 +236,12 @@ public:
 
     void    add_printables_webview_tab();
     void    remove_printables_webview_tab();
+
+    void    add_filamentdb_webview_tab();
+    void    remove_filamentdb_webview_tab();
+    // Add / drop / re-point the tab after `filamentdb_url` changed in Preferences.
+    void    refresh_filamentdb_webview_tab();
+    void    show_filamentdb_tab();
 
     void    show_printer_webview_tab(DynamicPrintConfig* dpc);
 

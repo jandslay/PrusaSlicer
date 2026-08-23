@@ -818,10 +818,18 @@ void MainFrame::create_preset_tabs()
    
     m_connect_webview = new ConnectWebViewPanel(m_tabpanel);
     m_printer_webview = new PrinterWebViewPanel(m_tabpanel, L"");
+
+    // The Filament DB tab goes in right after "Printables". When the user logs
+    // in, the "Prusa Connect" tab is inserted at Printables+1, which pushes it
+    // in between -- so the final order is Printables - Prusa Connect - Filament DB.
+    m_filamentdb_webview = new FilamentDBWebViewPanel(m_tabpanel);
+    add_filamentdb_webview_tab();
    
     // new created tabs have to be hidden by default
     m_connect_webview->Hide();
     m_printer_webview->Hide();
+    // Only a no-op when the tab went in: InsertNewPage already hid it there.
+    m_filamentdb_webview->Hide();
 
 }
 
@@ -870,10 +878,14 @@ void MainFrame::remove_connect_webview_tab()
     if (!m_connect_webview_added) {
         return;
     }
-    int n = m_tabpanel->FindPage(m_connect_webview);
-    if (m_tabpanel->GetSelection() == n)
-        m_tabpanel->SetSelection(0);
-    m_tabpanel->RemovePage(size_t(n));
+    const int n = m_tabpanel->FindPage(m_connect_webview);
+    if (n != wxNOT_FOUND) {
+        // Any selection at or right of the removed page is left dangling by
+        // TopBar::DoRemovePage, so move it out of the way first.
+        if (m_tabpanel->GetSelection() >= n)
+            m_tabpanel->SetSelection(0);
+        m_tabpanel->RemovePage(size_t(n));
+    }
     m_connect_webview_added = false;
     m_connect_webview->logout();
     m_connect_webview->destroy_browser();
@@ -922,6 +934,90 @@ void MainFrame::add_printables_webview_tab()
     m_tabpanel->InsertNewPage(n, page, text, bmp_name, false);
     m_printables_webview->set_create_browser();
     m_printables_webview_added = true;
+}
+
+void MainFrame::add_filamentdb_webview_tab()
+{
+    if (m_filamentdb_webview_added || !m_filamentdb_webview) {
+        return;
+    }
+    // An empty `filamentdb_url` means the FilamentDB integration is off for this
+    // session, so there is nothing to show and the tab stays away. (It is only
+    // ever empty until the next launch -- AppConfig::set_defaults() re-seeds the
+    // key on every load.)
+    const wxString url = FilamentDBWebViewPanel::url_from_app_config();
+    if (url.empty()) {
+        return;
+    }
+
+    // Sit directly to the right of "Prusa Connect" when it is there (the user is
+    // logged in), otherwise right of "Printables", otherwise right of "Printers".
+    int base = m_connect_webview_added ? m_tabpanel->FindPage(m_connect_webview) : wxNOT_FOUND;
+    if (base == wxNOT_FOUND)
+        base = m_tabpanel->FindPage(m_printables_webview);
+    if (base == wxNOT_FOUND)
+        base = m_tabpanel->FindPage(wxGetApp().get_tab(Preset::TYPE_PRINTER));
+    const size_t n = base == wxNOT_FOUND ? m_tabpanel->GetPageCount() : size_t(base + 1);
+
+    wxWindow* page = m_filamentdb_webview;
+    const wxString text(L"Filament DB");
+    const std::string bmp_name = "";
+    bool bSelect = false;
+    const int sel_before = m_tabpanel->GetSelection();
+    m_tabpanel->InsertNewPage(n, page, text, bmp_name, bSelect);
+    // TopBar::InsertNewPage does not call DoSetSelectionAfterInsertion the way
+    // Notebook::InsertPage does, so a selection at or right of the new page would
+    // still point at the old index -- i.e. at the wrong page. ChangeSelection
+    // re-points both the book control and the button strip without firing events
+    // and without touching page visibility, which is what we want: the visible
+    // page has not changed, only its index has.
+    if (sel_before != wxNOT_FOUND && sel_before >= int(n))
+        m_tabpanel->ChangeSelection(size_t(sel_before + 1));
+    // Re-point before the browser is created: the panel outlives a remove/add
+    // cycle and would otherwise still hold the URL from its constructor.
+    m_filamentdb_webview->set_default_url(url);
+    m_filamentdb_webview->reset_reached_default_url();
+    m_filamentdb_webview->set_create_browser();
+    m_filamentdb_webview_added = true;
+}
+
+void MainFrame::remove_filamentdb_webview_tab()
+{
+    if (!m_filamentdb_webview_added) {
+        return;
+    }
+    const int n = m_tabpanel->FindPage(m_filamentdb_webview);
+    if (n != wxNOT_FOUND) {
+        if (m_tabpanel->GetSelection() >= n)
+            m_tabpanel->SetSelection(0);
+        m_tabpanel->RemovePage(size_t(n));
+    }
+    m_filamentdb_webview_added = false;
+    m_filamentdb_webview->destroy_browser();
+}
+
+void MainFrame::refresh_filamentdb_webview_tab()
+{
+    if (!m_filamentdb_webview) {
+        return;
+    }
+    if (FilamentDBWebViewPanel::url_from_app_config().empty()) {
+        remove_filamentdb_webview_tab();
+        return;
+    }
+    if (!m_filamentdb_webview_added) {
+        add_filamentdb_webview_tab();
+        return;
+    }
+    m_filamentdb_webview->reload_from_app_config();
+}
+
+void MainFrame::show_filamentdb_tab()
+{
+    if (!m_filamentdb_webview_added) {
+        return;
+    }
+    m_tabpanel->SetSelection(m_tabpanel->FindPage(m_filamentdb_webview));
 }
 
 // no longer needed?
@@ -1002,6 +1098,8 @@ bool MainFrame::is_any_webview_selected()
         return true;
     if (m_printer_webview_added && selection == m_tabpanel->FindPage(m_printer_webview)) 
         return true;
+    if (m_filamentdb_webview_added && selection == m_tabpanel->FindPage(m_filamentdb_webview))
+        return true;
     return false;
 }
 
@@ -1014,6 +1112,8 @@ void MainFrame::reload_selected_webview()
         m_connect_webview->do_reload();
     if (m_printer_webview_added && selection == m_tabpanel->FindPage(m_printer_webview)) 
         m_printer_webview->do_reload();
+    if (m_filamentdb_webview_added && selection == m_tabpanel->FindPage(m_filamentdb_webview))
+        m_filamentdb_webview->do_reload();
 }
 
 void MainFrame::on_tab_change_rename_reload_item(int new_tab)
@@ -1023,7 +1123,8 @@ void MainFrame::on_tab_change_rename_reload_item(int new_tab)
     }
     if ( new_tab == m_tabpanel->FindPage(m_printables_webview) 
         || (m_connect_webview_added && new_tab == m_tabpanel->FindPage(m_connect_webview)) 
-        || (m_printer_webview_added && new_tab == m_tabpanel->FindPage(m_printer_webview))) 
+        || (m_printer_webview_added && new_tab == m_tabpanel->FindPage(m_printer_webview))
+        || (m_filamentdb_webview_added && new_tab == m_tabpanel->FindPage(m_filamentdb_webview))) 
     {
         m_menu_item_reload->SetItemLabel(_L("Re&load Web Content") + "\tF5");
         m_menu_item_reload->SetHelp(_L("Reload Web Content"));
@@ -1314,6 +1415,8 @@ void MainFrame::on_sys_color_changed()
         m_connect_webview->sys_color_changed();
     if (m_printer_webview)
         m_printer_webview->sys_color_changed();
+    if (m_filamentdb_webview)
+        m_filamentdb_webview->sys_color_changed();
 
     MenuFactory::sys_color_changed(m_menubar);
 

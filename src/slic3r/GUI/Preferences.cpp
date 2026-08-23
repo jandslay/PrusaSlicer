@@ -9,6 +9,7 @@
 #include "Preferences.hpp"
 #include "OptionsGroup.hpp"
 #include "GUI_App.hpp"
+#include "MainFrame.hpp"
 #include "Plater.hpp"
 #include "MsgDialog.hpp"
 #include "I18N.hpp"
@@ -853,6 +854,10 @@ void PreferencesDialog::accept(wxEvent&)
 
 	if (m_values.find("no_templates") != m_values.end())
 		wxGetApp().plater()->force_filament_cb_update();
+
+	// Add, drop or re-point the "Filament DB" tab to match the new URL.
+	if (m_values.find("filamentdb_url") != m_values.end() && wxGetApp().mainframe)
+		wxGetApp().mainframe->refresh_filamentdb_webview_tab();
 
 	wxGetApp().update_ui_from_settings();
 	clear_cache();

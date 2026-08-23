@@ -196,6 +196,37 @@ private:
     std::map<std::string, std::function<void(const std::string&)>> m_events;
 };
 
+// Hosts the Filament DB web UI in a slicer tab of its own, next to Prusa Connect.
+// The address is the `filamentdb_url` AppConfig key -- the same one the preset
+// sync, the calibration lookup and the spool check use -- so the tab always shows
+// the very server the rest of the FilamentDB integration talks to.
+class FilamentDBWebViewPanel : public WebViewPanel
+{
+public:
+    FilamentDBWebViewPanel(wxWindow* parent);
+
+    void on_navigation_request(wxWebViewEvent& evt) override;
+    void on_script_message(wxWebViewEvent& evt) override;
+
+    // Re-point the browser after `filamentdb_url` changed in Preferences.
+    void reload_from_app_config();
+
+    // Forget that the old URL was ever reached. The panel outlives a remove/add
+    // cycle, and a stale flag would let on_navigation_request veto the freshly
+    // created browser's navigation to the loading page.
+    void reset_reached_default_url() { m_reached_default_url = false; }
+
+    // The configured URL, trimmed. Empty when the user cleared the key, which
+    // is how the whole FilamentDB integration is switched off.
+    static wxString url_from_app_config();
+
+protected:
+    // Injects no CSS -- the Filament DB UI brings its own theming -- but this is
+    // also where the sibling panels install the macOS keyboard bridge, so it has
+    // a real implementation rather than being a no-op.
+    void define_css() override;
+};
+
 class PrintablesWebViewPanel : public WebViewPanel
 {
 public:
