@@ -670,6 +670,15 @@ void PreferencesDialog::build()
 			m_optgroup_other->append_single_option_line(option);
 		}
 
+		append_bool_option(m_optgroup_other, "filamentdb_autostart",
+			L("Start the Filament DB in the background"),
+			L("If enabled, PrusaSlicer starts the Filament DB itself when nothing is already "
+			  "serving it, so you do not have to launch the Filament DB application separately. "
+			  "A background server started this way is stopped again when PrusaSlicer closes. "
+			  "If it cannot be started, PrusaSlicer falls back to launching the Filament DB "
+			  "application minimised, which then stays open."),
+			app_config->get_bool("filamentdb_autostart"));
+
 		activate_options_tab(m_optgroup_other);
 
 		create_downloader_path_sizer();

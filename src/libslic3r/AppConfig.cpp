@@ -169,6 +169,11 @@ void AppConfig::set_defaults()
         if (get("filamentdb_url").empty())
             set("filamentdb_url", "http://localhost:3456");
 
+        // Start the Filament DB backend ourselves, so the user only has to
+        // launch the slicer. See slic3r/Utils/FilamentDBServer.
+        if (get("filamentdb_autostart").empty())
+            set("filamentdb_autostart", "1");
+
         // Default calibration menu order
         if (!has_section("calibration_menu_order"))
             set_section("calibration_menu_order", {

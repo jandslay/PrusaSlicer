@@ -384,6 +384,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/AppUpdater.hpp
     Utils/FilamentDB.cpp
     Utils/FilamentDB.hpp
+    Utils/FilamentDBServer.cpp
+    Utils/FilamentDBServer.hpp
     Utils/Http.cpp
     Utils/Http.hpp
     Utils/FixModelByWin10.cpp

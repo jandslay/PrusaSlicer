@@ -8,6 +8,7 @@
 ///|/
 #include "libslic3r/Technologies.hpp"
 #include "slic3r/Utils/FilamentDB.hpp"
+#include "slic3r/Utils/FilamentDBServer.hpp"
 #include "GUI_App.hpp"
 #include "FilamentScanClient.hpp"
 #include "GUI_Init.hpp" // IWYU pragma: keep
@@ -920,6 +921,9 @@ GUI_App::~GUI_App()
     // so by the time we touch preset_bundle no more callbacks can
     // fire.
     if (m_filament_scan_client) m_filament_scan_client.reset();
+    // Stop the Filament DB backend if we started it. Deliberately here and not
+    // in MainFrame::shutdown(), which also runs on a UI language change.
+    FilamentDBServer::instance().shutdown();
     delete app_config;
     delete preset_bundle;
 }
@@ -1597,6 +1601,33 @@ bool GUI_App::on_init_inner()
 #endif // __WXMSW__
     }
     
+    // Bring the Filament DB backend up before the presets are loaded --
+    // load_presets() pulls them over HTTP and never retries, so the server has
+    // to be answering by then. Failure is deliberately non-fatal: a missing
+    // Filament DB must never stop the slicer from starting.
+    //
+    // This blocks the splash screen, so the budget is deliberately modest. A
+    // warm start takes a couple of seconds; when nothing is installed at all
+    // the probe and the path detection both fail immediately.
+    if (filamentdb_autostart_enabled()) {
+        const std::string filamentdb_url = app_config->get("filamentdb_url");
+        if (!filamentdb_url.empty()) {
+            // Catch everything: OnInit turns any escaping exception into a
+            // refusal to start, which is precisely what must not happen here.
+            try {
+                std::string filamentdb_error;
+                if (!FilamentDBServer::instance().ensure_running(filamentdb_url, 20000,
+                                                                 filamentdb_error))
+                    BOOST_LOG_TRIVIAL(warning)
+                        << "FilamentDB server: not available (" << filamentdb_error << ")";
+            } catch (const std::exception &ex) {
+                BOOST_LOG_TRIVIAL(error) << "FilamentDB server: " << ex.what();
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "FilamentDB server: unknown error while starting";
+            }
+        }
+    }
+
     std::string delayed_error_load_presets;
     // Suppress the '- default -' presets.
     preset_bundle->set_default_suppressed(app_config->get_bool("no_defaults"));
