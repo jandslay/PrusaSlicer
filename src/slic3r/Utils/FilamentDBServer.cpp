@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <iterator>
+#include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
@@ -59,7 +60,7 @@ static const char *KEY_DATA_DIR   = "filamentdb_data_dir";
 // AND that it reached MongoDB. The app has no dedicated health route.
 static const char *PRESET_ENDPOINT = "api/filaments/prusaslicer";
 
-// Defined further down; the fallback path in ensure_running() needs it earlier.
+// Defined further down; the fallback path in start() needs it earlier.
 static bool start_desktop_app(const fs::path &app_exe, std::string &error);
 
 // ---------------------------------------------------------------------------
@@ -488,6 +489,8 @@ struct FilamentDBServer::Impl
     std::unique_ptr<bp::child> mongod;
     std::unique_ptr<bp::child> server;
     bool started_by_us{false};
+    std::thread       watcher;
+    std::atomic<bool> stop_watcher{false};
 #ifdef _WIN32
     // Both children join this job, which is set to kill them when the last
     // handle closes -- so they die with the slicer even if it crashes and no
@@ -561,7 +564,7 @@ static int find_free_port()
     }
 }
 
-bool FilamentDBServer::ensure_running(const std::string &url, int timeout_ms, std::string &error)
+bool FilamentDBServer::start(const std::string &url, std::string &error)
 {
     error.clear();
     if (url.empty()) {
@@ -569,41 +572,31 @@ bool FilamentDBServer::ensure_running(const std::string &url, int timeout_ms, st
         return false;
     }
 
-    // One deadline for the whole operation. Every phase below draws from it, so
-    // the caller's budget is what it says it is -- this blocks the splash screen.
-    const auto deadline  = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    auto       remaining = [&deadline]() -> int {
-        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              deadline - std::chrono::steady_clock::now()).count();
-        return static_cast<int>(std::max<long long>(0, left));
-    };
-
     // A URL that is not on this machine belongs to somebody else's server.
     const std::string host = host_from_url(url);
     if (!is_loopback_host(host)) {
         error = "the Filament DB URL points at " + host + ", which is not this machine";
-        return is_reachable(url, std::min(remaining(), 3000));
+        return false;
     }
 
     // Somebody already owns this port -- the user's own Filament DB app, or a
     // backend from an earlier run. Never start a second one: it would collide
     // on the MongoDB lock, and launching the desktop app again only produces
-    // its "already running" error box. Just wait for it to finish booting.
+    // its "already running" error box. It is on its way up; that is enough.
     const int port = port_from_url(url);
     bool      port_unknown = false;
-    if (is_port_bound(port, std::min(remaining(), 1500), port_unknown) || port_unknown) {
+    if (is_port_bound(port, 1500, port_unknown) || port_unknown) {
         BOOST_LOG_TRIVIAL(info) << "FilamentDB server: port " << port << " is already served";
-        if (wait_until_reachable(url, remaining()))
-            return true;
-        error = "something is already listening on port " + std::to_string(port)
-              + " but it did not answer";
-        return false;
+        return true;
     }
+
+    if (p->started_by_us && p->mongod && p->server)
+        return true;    // ours, already spawned
 
     const FilamentDBServerPaths paths = detect_filamentdb_server_paths();
 
     if (paths.complete()) {
-        if (start_headless(paths, url, remaining(), error))
+        if (spawn_backend(paths, url, error))
             return true;
         BOOST_LOG_TRIVIAL(warning) << "FilamentDB server: headless start failed: " << error;
     } else {
@@ -614,20 +607,58 @@ bool FilamentDBServer::ensure_running(const std::string &url, int timeout_ms, st
     // Fall back to the app's own supported entry point. It puts a window on the
     // screen, but it survives Filament DB updates that move the internals the
     // headless path depends on.
-    if (remaining() == 0 || paths.app_exe.empty())
+    if (paths.app_exe.empty())
         return false;
 
     std::string fallback_error;
     if (start_desktop_app(paths.app_exe, fallback_error)) {
-        if (wait_until_reachable(url, remaining())) {
-            error.clear();
-            return true;
-        }
-        error = "the Filament DB application was started but did not answer in time";
-    } else if (!fallback_error.empty()) {
-        error += error.empty() ? fallback_error : ("; " + fallback_error);
+        error.clear();
+        return true;
     }
+    if (!fallback_error.empty())
+        error += error.empty() ? fallback_error : ("; " + fallback_error);
     return false;
+}
+
+bool FilamentDBServer::wait_ready(const std::string &url, int timeout_ms)
+{
+    return wait_until_reachable(url, timeout_ms);
+}
+
+void FilamentDBServer::watch_until_ready(const std::string &url, int timeout_ms,
+                                         std::function<void()> on_ready)
+{
+    if (url.empty() || p->watcher.joinable())
+        return;
+
+    p->stop_watcher = false;
+    p->watcher = std::thread([this, url, timeout_ms, on_ready]() {
+        const auto deadline = std::chrono::steady_clock::now()
+                            + std::chrono::milliseconds(timeout_ms);
+        while (!p->stop_watcher && std::chrono::steady_clock::now() < deadline) {
+            if (is_reachable(url, 4000)) {
+                BOOST_LOG_TRIVIAL(info) << "FilamentDB server: became reachable";
+                if (on_ready && !p->stop_watcher)
+                    on_ready();
+                return;
+            }
+            // A child of ours that died is never coming back.
+            try {
+                if (p->started_by_us
+                    && ((p->mongod && !p->mongod->running())
+                        || (p->server && !p->server->running()))) {
+                    BOOST_LOG_TRIVIAL(warning)
+                        << "FilamentDB server: " << child_failure_reason();
+                    return;
+                }
+            } catch (const std::exception &) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        if (!p->stop_watcher)
+            BOOST_LOG_TRIVIAL(warning) << "FilamentDB server: gave up waiting for " << url;
+    });
 }
 
 bool FilamentDBServer::wait_until_reachable(const std::string &url, int timeout_ms)
@@ -672,16 +703,10 @@ std::string FilamentDBServer::child_failure_reason() const
     return {};
 }
 
-bool FilamentDBServer::start_headless(const FilamentDBServerPaths &paths,
-                                      const std::string &url,
-                                      int timeout_ms,
-                                      std::string &error)
+bool FilamentDBServer::spawn_backend(const FilamentDBServerPaths &paths,
+                                     const std::string &url,
+                                     std::string &error)
 {
-    if (timeout_ms <= 0) {
-        error = "no time left to start the Filament DB backend";
-        return false;
-    }
-
     const int mongo_port = find_free_port();
     if (mongo_port == 0) {
         error = "no free TCP port for the database";
@@ -701,7 +726,7 @@ bool FilamentDBServer::start_headless(const FilamentDBServerPaths &paths,
         }
 #endif
 
-        // The URL host is ASCII by construction -- ensure_running() has already
+        // The URL host is ASCII by construction -- start() has already
         // rejected anything that is not a loopback name.
         const std::string  host      = host_from_url(url);
         const std::string  mongo_uri = "mongodb://127.0.0.1:" + std::to_string(mongo_port)
@@ -786,17 +811,8 @@ bool FilamentDBServer::start_headless(const FilamentDBServerPaths &paths,
     }
 
     p->started_by_us = true;
-    BOOST_LOG_TRIVIAL(info) << "FilamentDB server: started headless, MongoDB on port " << mongo_port;
-
-    if (wait_until_reachable(url, timeout_ms))
-        return true;
-
-    error = child_failure_reason();
-    if (error.empty())
-        error = "the Filament DB backend did not answer in time";
-    // We are on the caller's deadline, so do not spend another 13 s being polite.
-    shutdown(0);
-    return false;
+    BOOST_LOG_TRIVIAL(info) << "FilamentDB server: spawned headless, MongoDB on port " << mongo_port;
+    return true;
 }
 
 static bool start_desktop_app(const fs::path &app_exe, std::string &error)
@@ -868,6 +884,12 @@ static void stop_child(std::unique_ptr<bp::child> &child, int grace_ms)
 
 void FilamentDBServer::shutdown(int grace_ms)
 {
+    // Stop the watcher before the children, so it cannot observe a half-torn
+    // down backend and fire its ready callback into a shutting-down GUI.
+    p->stop_watcher = true;
+    if (p->watcher.joinable())
+        p->watcher.join();
+
     if (!p->started_by_us && !p->mongod && !p->server)
         return;
 

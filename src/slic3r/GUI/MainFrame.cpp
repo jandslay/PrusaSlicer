@@ -1012,6 +1012,16 @@ void MainFrame::refresh_filamentdb_webview_tab()
     m_filamentdb_webview->reload_from_app_config();
 }
 
+void MainFrame::reload_filamentdb_webview_tab()
+{
+    if (!m_filamentdb_webview_added || !m_filamentdb_webview) {
+        return;
+    }
+    // do_reload() falls back to loading the default URL when the panel is
+    // sitting on the error page, which is exactly the case here.
+    m_filamentdb_webview->do_reload();
+}
+
 void MainFrame::show_filamentdb_tab()
 {
     if (!m_filamentdb_webview_added) {

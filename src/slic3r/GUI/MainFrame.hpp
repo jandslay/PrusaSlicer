@@ -241,6 +241,8 @@ public:
     void    remove_filamentdb_webview_tab();
     // Add / drop / re-point the tab after `filamentdb_url` changed in Preferences.
     void    refresh_filamentdb_webview_tab();
+    // Re-fetch the page, e.g. once the backend has finished starting.
+    void    reload_filamentdb_webview_tab();
     void    show_filamentdb_tab();
 
     void    show_printer_webview_tab(DynamicPrintConfig* dpc);

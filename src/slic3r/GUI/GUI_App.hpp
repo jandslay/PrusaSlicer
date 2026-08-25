@@ -364,6 +364,10 @@ public:
     AppConfig*      app_config{ nullptr };
     PresetBundle*   preset_bundle{ nullptr };
     MainFrame*      mainframe{ nullptr };
+
+    // Pull in the Filament DB presets once the backend has finished starting.
+    // Runs on the GUI thread.
+    void            on_filamentdb_ready(const std::string &url);
     Plater*         plater_{ nullptr };
 	PresetUpdaterWrapper*  get_preset_updater_wrapper() { return m_preset_updater_wrapper.get(); }
 

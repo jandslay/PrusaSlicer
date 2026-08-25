@@ -5,6 +5,7 @@
 #ifndef slic3r_Utils_FilamentDBServer_hpp_
 #define slic3r_Utils_FilamentDBServer_hpp_
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -62,13 +63,28 @@ public:
     static bool is_reachable(const std::string& url, int timeout_ms = 1500,
                              unsigned *out_status = nullptr);
 
-    // Bring the backend up unless it is already reachable.
+    // Make sure the backend is coming up, WITHOUT waiting for it.
     //
-    // Blocking, bounded by `timeout_ms`. Returns true if `url` answers by the
-    // time it returns. On failure `error` says what went wrong; the caller is
-    // expected to carry on regardless -- a missing Filament DB must never stop
-    // the slicer from starting.
-    bool ensure_running(const std::string& url, int timeout_ms, std::string& error);
+    // Spawning is a matter of milliseconds; becoming answerable is not. A warm
+    // backend serves its first request after ~3 s, but the very first start
+    // after a reboot takes ~45 s, because Windows has to fault the Filament DB
+    // installation (>200 MB, packaged unpacked) into its file cache. Blocking
+    // the splash screen for that is not acceptable, so waiting is left to the
+    // caller: a short wait_ready() for the warm case, and watch_until_ready()
+    // for the rest.
+    //
+    // Returns false only if the backend could not be started at all; `error`
+    // then says why. A missing Filament DB must never stop the slicer.
+    bool start(const std::string& url, std::string& error);
+
+    // Poll until `url` answers, at most `timeout_ms`. Blocking.
+    bool wait_ready(const std::string& url, int timeout_ms);
+
+    // Poll in the background and call `on_ready` once, from the worker thread,
+    // as soon as `url` answers. Gives up after `timeout_ms`. At most one
+    // watcher runs at a time; shutdown() stops it.
+    void watch_until_ready(const std::string& url, int timeout_ms,
+                           std::function<void()> on_ready);
 
     // Stop what this process started, gracefully, with a bounded fallback to a
     // hard kill. A no-op when we started nothing. Safe to call more than once.
@@ -86,15 +102,12 @@ private:
     FilamentDBServer();
     ~FilamentDBServer();
 
-    // Start mongod plus the bundled Next.js server, both without a window, and
-    // wait for `url` to answer. Cleans up after itself on failure.
-    bool start_headless(const FilamentDBServerPaths &paths,
-                        const std::string           &url,
-                        int                          timeout_ms,
-                        std::string                 &error);
-
     // Poll `url` until it answers, giving up early if a child we started died.
     bool wait_until_reachable(const std::string &url, int timeout_ms);
+
+    // Spawn mongod and the bundled server. Does not wait for either.
+    bool spawn_backend(const FilamentDBServerPaths &paths, const std::string &url,
+                       std::string &error);
 
     // Empty while both children are alive, otherwise why the start failed.
     std::string child_failure_reason() const;

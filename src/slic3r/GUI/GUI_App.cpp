@@ -910,6 +910,31 @@ GUI_App::GUI_App(EAppMode mode)
     m_app_updater = std::make_unique<AppUpdater>();
 }
 
+// The backend finished starting after the slicer had already come up, so the
+// filament presets the startup pull could not fetch are pulled in now.
+void GUI_App::on_filamentdb_ready(const std::string &url)
+{
+    if (preset_bundle == nullptr)
+        return;
+    try {
+        std::string error;
+        const int   count = load_filaments_from_filamentdb(*preset_bundle, url, error);
+        if (count > 0) {
+            BOOST_LOG_TRIVIAL(info) << "FilamentDB: loaded " << count << " presets late";
+            preset_bundle->update_compatible(PresetSelectCompatibleType::Never);
+            if (plater_ != nullptr)
+                plater_->force_filament_cb_update();
+        } else if (count < 0) {
+            BOOST_LOG_TRIVIAL(warning) << "FilamentDB: " << error;
+        }
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << "FilamentDB: late preset load failed: " << ex.what();
+    }
+    // The tab was very likely showing the error page while the backend booted.
+    if (mainframe != nullptr)
+        mainframe->reload_filamentdb_webview_tab();
+}
+
 GUI_App::~GUI_App()
 {
     // Stop the scan client BEFORE the manual deletes below. The
@@ -1601,25 +1626,37 @@ bool GUI_App::on_init_inner()
 #endif // __WXMSW__
     }
     
-    // Bring the Filament DB backend up before the presets are loaded --
-    // load_presets() pulls them over HTTP and never retries, so the server has
-    // to be answering by then. Failure is deliberately non-fatal: a missing
-    // Filament DB must never stop the slicer from starting.
+    // Get the Filament DB backend going before the presets are loaded, because
+    // load_presets() pulls them over HTTP and never retries.
     //
-    // This blocks the splash screen, so the budget is deliberately modest. A
-    // warm start takes a couple of seconds; when nothing is installed at all
-    // the probe and the path detection both fail immediately.
+    // Only a SHORT wait happens here. Spawning costs milliseconds, but becoming
+    // answerable does not: a warm backend serves its first request after ~3 s,
+    // while the first start after a reboot takes ~45 s -- Windows has to fault
+    // the Filament DB installation (>200 MB, packaged unpacked) into its file
+    // cache. Blocking the splash screen for that is not acceptable, so the cold
+    // case is handed to a background watcher that pulls the presets in as soon
+    // as the backend answers. Failure is deliberately non-fatal throughout.
     if (filamentdb_autostart_enabled()) {
         const std::string filamentdb_url = app_config->get("filamentdb_url");
         if (!filamentdb_url.empty()) {
             // Catch everything: OnInit turns any escaping exception into a
             // refusal to start, which is precisely what must not happen here.
             try {
-                std::string filamentdb_error;
-                if (!FilamentDBServer::instance().ensure_running(filamentdb_url, 20000,
-                                                                 filamentdb_error))
+                FilamentDBServer &filamentdb = FilamentDBServer::instance();
+                std::string       filamentdb_error;
+                if (!filamentdb.start(filamentdb_url, filamentdb_error)) {
                     BOOST_LOG_TRIVIAL(warning)
                         << "FilamentDB server: not available (" << filamentdb_error << ")";
+                } else if (!filamentdb.wait_ready(filamentdb_url, 6000)) {
+                    BOOST_LOG_TRIVIAL(info)
+                        << "FilamentDB server: still starting, continuing without it";
+                    filamentdb.watch_until_ready(filamentdb_url, 240000, [filamentdb_url]() {
+                        // Called from the watcher thread -- hop to the GUI thread.
+                        wxGetApp().CallAfter([filamentdb_url]() {
+                            wxGetApp().on_filamentdb_ready(filamentdb_url);
+                        });
+                    });
+                }
             } catch (const std::exception &ex) {
                 BOOST_LOG_TRIVIAL(error) << "FilamentDB server: " << ex.what();
             } catch (...) {
