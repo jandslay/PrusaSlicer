@@ -20,7 +20,6 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/steady_timer.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/process.hpp>
@@ -154,75 +153,41 @@ static bool path_exists(const fs::path &p)
     return fs::exists(p, ec) && !ec;
 }
 
-// Is anything already listening on this loopback port? Cheaper and far more
-// reliable than an HTTP probe for the question "does somebody else own this
-// port", because a server that is still booting refuses the connection but is
-// very much on its way up.
+// Is anything already listening on this loopback port? A better question than
+// "does it answer HTTP", because a server that is still booting refuses the
+// connection while very much being on its way up.
 //
-// `unknown` is set when the probe ran out of budget. That is not the same as
-// "free": spawning a second backend against an unknown owner collides on the
-// MongoDB lock, so callers must treat unknown as occupied.
-static bool is_port_bound(int port, int budget_ms, bool &unknown)
+// Deliberately a plain blocking connect. An earlier version wrapped this in an
+// asio timer so a hypothetical dropped SYN could not stall start-up, and
+// reported any ambiguous outcome as "occupied" -- which under load produced a
+// false positive, skipped the spawn altogether and left the user with a dead
+// Filament DB and one line in a log. Loopback does not drop: a refusal takes
+// single-digit milliseconds. Anything genuinely undecidable is reported as
+// FREE, because starting a second backend at worst costs a mongod that exits
+// on the lock file (and says so), whereas not starting one costs the feature.
+static bool is_port_bound(int port)
 {
-    unknown = false;
     if (port <= 0)
         return false;
-    if (budget_ms <= 0) {
-        unknown = true;
-        return false;
-    }
 
-    const auto deadline = std::chrono::steady_clock::now()
-                        + std::chrono::milliseconds(budget_ms);
     for (const char *addr : { "127.0.0.1", "::1" }) {
-        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              deadline - std::chrono::steady_clock::now());
-        if (left.count() <= 0) {
-            unknown = true;
-            return false;
-        }
         try {
-            boost::system::error_code parse_ec;
-            const auto address = boost::asio::ip::make_address(addr, parse_ec);
-            if (parse_ec)
+            boost::system::error_code ec;
+            const auto address = boost::asio::ip::make_address(addr, ec);
+            if (ec)
                 continue;
 
             boost::asio::io_context      io;
             boost::asio::ip::tcp::socket socket(io);
-            boost::asio::steady_timer    timer(io);
-
-            bool                      timed_out = false;
-            boost::system::error_code connect_ec = boost::asio::error::would_block;
-            socket.async_connect(
-                boost::asio::ip::tcp::endpoint(address, static_cast<unsigned short>(port)),
-                [&connect_ec](const boost::system::error_code &ec) { connect_ec = ec; });
-
-            timer.expires_after(left);
-            timer.async_wait([&](const boost::system::error_code &ec) {
-                if (!ec) {
-                    timed_out = true;
-                    boost::system::error_code ignored;
-                    socket.close(ignored);
-                }
-            });
-
-            // Loopback answers immediately; the timer is only there so a
-            // firewall that drops instead of refusing cannot stall start-up.
-            while (connect_ec == boost::asio::error::would_block && !timed_out)
-                io.run_one();
-
-            boost::system::error_code ignored;
-            timer.cancel(ignored);
-            socket.close(ignored);
-
-            if (timed_out) {
-                unknown = true;
-                return false;
-            }
-            if (!connect_ec)
+            socket.connect(
+                boost::asio::ip::tcp::endpoint(address, static_cast<unsigned short>(port)), ec);
+            if (!ec) {
+                boost::system::error_code ignored;
+                socket.close(ignored);
                 return true;
+            }
         } catch (const std::exception &) {
-            // Treat an unusable address family as "nothing there".
+            // An unusable address family means nothing is there on it.
         }
     }
     return false;
@@ -584,14 +549,15 @@ bool FilamentDBServer::start(const std::string &url, std::string &error)
     // on the MongoDB lock, and launching the desktop app again only produces
     // its "already running" error box. It is on its way up; that is enough.
     const int port = port_from_url(url);
-    bool      port_unknown = false;
-    if (is_port_bound(port, 1500, port_unknown) || port_unknown) {
+    if (is_port_bound(port)) {
         BOOST_LOG_TRIVIAL(info) << "FilamentDB server: port " << port << " is already served";
         return true;
     }
 
     if (p->started_by_us && p->mongod && p->server)
         return true;    // ours, already spawned
+
+    BOOST_LOG_TRIVIAL(info) << "FilamentDB server: port " << port << " is free, starting the backend";
 
     const FilamentDBServerPaths paths = detect_filamentdb_server_paths();
 
